@@ -29,11 +29,24 @@ class MyApp extends StatelessWidget {
 class BluetoothVoiceApp extends StatefulWidget {
   const BluetoothVoiceApp({super.key});
 
+
   @override
   BluetoothVoiceAppState createState() => BluetoothVoiceAppState();
 }
 
 class BluetoothVoiceAppState extends State<BluetoothVoiceApp> {
+
+  List<BluetoothDevice> _devicesList = [];
+  String connectionStatus = "Not connected";
+
+  void showSnackBar(String message) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(content: Text(message)),
+  );
+}
+
+
+
   final TextEditingController _textController = TextEditingController();
   final stt.SpeechToText _speech = stt.SpeechToText();
 
@@ -45,29 +58,71 @@ class BluetoothVoiceAppState extends State<BluetoothVoiceApp> {
   @override
   void initState() {
     super.initState();
-    _checkPermissions();
+    _checkPermissions().then((_) => _loadBondedDevices());
   }
+
 
   Future<void> _checkPermissions() async {
     await Permission.bluetooth.request();
     await Permission.bluetoothConnect.request();
+    await Permission.bluetoothScan.request(); // <-- Add this
+    await Permission.bluetoothAdvertise.request(); // <-- Optional, for completeness
     await Permission.microphone.request();
     await Permission.locationWhenInUse.request();
+
+    _devicesList = await FlutterBluetoothSerial.instance.getBondedDevices();
+    setState(() {});
   }
 
-  Future<void> _connectToHC05() async {
-    List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
-    BluetoothDevice? hc05 = devices.firstWhere(
-      (d) => d.name == "HC-05",
-      orElse: () => devices.first,
-    );
 
+  Future<void> _loadBondedDevices() async {
+    final devices = await FlutterBluetoothSerial.instance.getBondedDevices();
+    setState(() {
+      _devicesList = devices;
+    });
+  }
+
+  void _showDevicePicker() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Select Bluetooth Device'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: _devicesList.isEmpty
+                ? Text("No paired devices found.")
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: _devicesList.length,
+                    itemBuilder: (context, index) {
+                      BluetoothDevice device = _devicesList[index];
+                      return ListTile(
+                        title: Text(device.name ?? "Unknown"),
+                        subtitle: Text(device.address),
+                        onTap: () {
+                          Navigator.pop(context); // close dialog
+                          _connectToDevice(device);
+                        },
+                      );
+                    },
+                  ),
+          ),
+        );
+      },
+    );
+  }
+
+
+
+  Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
-      BluetoothConnection connection = await BluetoothConnection.toAddress(hc05.address);
+      BluetoothConnection connection = await BluetoothConnection.toAddress(device.address);
       setState(() {
         _connection = connection;
         _isConnected = true;
       });
+      showSnackBar("Connected to ${device.name}");
 
       connection.input!.listen((data) {
         setState(() {
@@ -76,16 +131,35 @@ class BluetoothVoiceAppState extends State<BluetoothVoiceApp> {
       });
     } catch (e) {
       logger.e('Connection failed', error: e);
+      showSnackBar("Failed to connect to ${device.name}");
     }
   }
 
+
+
   void _sendMessage() async {
-    if (_connection != null && _isConnected && _textController.text.isNotEmpty) {
-      _connection!.output.add(utf8.encode('${_textController.text}\n'));
-      await _connection!.output.allSent;
-      _textController.clear();
+    if (!_isConnected || _connection == null) {
+      showSnackBar("Not connected to a device.");
+      return;
+    }
+
+    final message = _textController.text.trim();
+
+    if (message.isNotEmpty) {
+      try {
+        _connection!.output.add(utf8.encode('$message\n')); // Send to Arduino
+        await _connection!.output.allSent;
+
+        logger.i("Sent to Arduino: $message");
+ // ✅ Log to terminal
+        _textController.clear(); // Clear the input field
+      } catch (e) {
+        logger.e("Failed to send message", error: e);
+        showSnackBar("Error sending data.");
+      }
     }
   }
+
 
   void _startListening() async {
     bool available = await _speech.initialize(
@@ -121,11 +195,11 @@ class BluetoothVoiceAppState extends State<BluetoothVoiceApp> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text("Voice + Bluetooth to HC-05"),
+        title: Text("Morse_Project_App"),
         actions: [
           IconButton(
-            icon: Icon(Icons.bluetooth_connected),
-            onPressed: _connectToHC05,
+            icon: Icon(Icons.bluetooth_searching),
+            onPressed: _showDevicePicker,
           ),
         ],
       ),
@@ -157,6 +231,14 @@ class BluetoothVoiceAppState extends State<BluetoothVoiceApp> {
               ],
             ),
             SizedBox(height: 20),
+
+
+            Text(
+              _isConnected ? "Connected to Bluetooth device" : "Not connected",
+              style: TextStyle(color: _isConnected ? Colors.green : Colors.red),
+            ),
+            SizedBox(height: 10),
+
             Text("Received from Arduino:"),
             Container(
               height: 100,
